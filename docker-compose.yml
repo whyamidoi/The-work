@@ -1,43 +1,39 @@
-# controller/app.py
-import docker
-import uuid
-import os
-import logging
-from flask import Flask, request, redirect, url_for, render_template_string
+version: "3.8"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+services:
+  reverse-proxy:
+    image: traefik:v2.11
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks:
+      - proxy_network
 
-app = Flask(__name__)
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      REVERSE_PROXY_BASE_URL: ${REVERSE_PROXY_BASE_URL:-http://localhost}
+    ports:
+      - "5000:5000"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - proxy_network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.controller_route.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.controller_route.entrypoints=web"
+      - "traefik.http.services.controller_service.loadbalancer.server.port=5000"
 
-REVERSE_PROXY_BASE_URL = os.getenv('REVERSE_PROXY_BASE_URL', 'http://localhost')
-logging.info(f"Using REVERSE_PROXY_BASE_URL: {REVERSE_PROXY_BASE_URL}")
-if REVERSE_PROXY_BASE_URL == 'http://localhost':
-    logging.warning("REVERSE_PROXY_BASE_URL is set to default 'http://localhost'. "
-                    "This is likely incorrect for Codespaces. Ensure it's set via environment variable.")
-
-FIREFOX_IMAGE = "jlesage/firefox:latest"
-FIREFOX_INTERNAL_PORT = "5800"
-DOCKER_NETWORK = "proxy_network"
-STOP_PASSWORD = "1234"  # Password to stop sessions
-
-client = None
-try:
-    client = docker.from_env()
-    client.ping()
-    logging.info("Successfully connected to Docker daemon.")
-except Exception as e:
-    logging.error(f"Fatal Error: Could not connect to Docker daemon: {e}")
-
-active_sessions = {}
-status_log_messages = []
-
-def add_status(message):
-    logging.info(message)
-    status_log_messages.insert(0, f"[{os.times().elapsed:.2f}s] {message}")
-    while len(status_log_messages) > 10:
-        status_log_messages.pop()
-
-HOME_PAGE_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
+networks:
+  proxy_network:
+    external: true
