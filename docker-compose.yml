@@ -1,71 +1,43 @@
-version: '3.8'
+# controller/app.py
+import docker
+import uuid
+import os
+import logging
+from flask import Flask, request, redirect, url_for, render_template_string
 
-services:
-  reverse-proxy:
-    # The official Traefik image
-    image: traefik:v2.11 # Using a specific version is recommended
-    container_name: traefik_proxy
-    # Enables the web UI and tells Traefik to listen to Docker
-    command:
-      - "--api.insecure=true" # Use secure mode (behind auth) in production
-      - "--api.dashboard=true"
-      - "--providers.docker=true"
-      # Important: Prevent Traefik from exposing containers by default
-      - "--providers.docker.exposedbydefault=false"
-      # Define an entry point named 'web' listening on port 80
-      - "--entrypoints.web.address=:80"
-      # Optional: Enable access logs for debugging
-      - "--accesslog=true"
-      # Optional: Set log level
-      - "--log.level=INFO" # Use DEBUG for more verbose logs if needed
-    ports:
-      # Publish the entrypoint to the host. Codespaces will forward this.
-      - "80:80"
-      # Optional: Expose the Traefik dashboard (usually not needed for users)
-      # - "8081:8080" # Using 8081 on host to avoid conflict if 8080 is used
-    volumes:
-      # So that Traefik can listen to the Docker events
-      # Use :ro (read-only) for better security for Traefik
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-    networks:
-      - proxy_network # Connect to the custom network
-    # restart: unless-stopped # Good practice for production
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-  controller:
-    # Build the image from Dockerfile.controller in the current directory
-    build:
-      context: .
-      dockerfile: Dockerfile.controller
-    container_name: firefox_controller_app
-    depends_on:
-      - reverse-proxy # Wait for proxy to be available (basic check)
-    volumes:
-      # Mount the Docker socket to allow this container to start other containers
-      # Needs read-write access. SECURITY RISK!
-      - "/var/run/docker.sock:/var/run/docker.sock"
-    networks:
-      - proxy_network # Connect to the custom network
-    environment:
-      # !! IMPORTANT FOR CODESPACES !!
-      # You MUST replace the value below with the actual public URL
-      # assigned by GitHub Codespaces to the forwarded port 80.
-      # Find this URL in the 'Ports' tab in VS Code after running 'docker-compose up'.
-      # Example: REVERSE_PROXY_BASE_URL=https://your-codespace-name-random-chars-80.githubpreview.dev
-      - REVERSE_PROXY_BASE_URL=https://studious-space-system-pjvrr9g579726r69-80.app.github.dev/
-      # Example: Optionally set a default password if the Firefox image uses VNC_PW
-      # - VNC_DEFAULT_PASSWORD=codespacefun
-    labels:
-      # Labels for Traefik to route traffic TO THIS controller app
-      - "traefik.enable=true"
-      # Route requests for the root path '/' to the controller service
-      - "traefik.http.routers.controller_route.rule=PathPrefix(`/`)"
-      # Use the 'web' entrypoint (port 80)
-      - "traefik.http.routers.controller_route.entrypoints=web"
-      # Specify the internal port Flask is running on (from Dockerfile.controller EXPOSE/CMD)
-      - "traefik.http.services.controller_service.loadbalancer.server.port=5000"
-    # restart: unless-stopped # Good practice for production
+app = Flask(__name__)
 
-# Define the custom network
-networks:
-  proxy_network:
-    name: proxy_network # Explicitly naming the network
+REVERSE_PROXY_BASE_URL = os.getenv('REVERSE_PROXY_BASE_URL', 'http://localhost')
+logging.info(f"Using REVERSE_PROXY_BASE_URL: {REVERSE_PROXY_BASE_URL}")
+if REVERSE_PROXY_BASE_URL == 'http://localhost':
+    logging.warning("REVERSE_PROXY_BASE_URL is set to default 'http://localhost'. "
+                    "This is likely incorrect for Codespaces. Ensure it's set via environment variable.")
+
+FIREFOX_IMAGE = "jlesage/firefox:latest"
+FIREFOX_INTERNAL_PORT = "5800"
+DOCKER_NETWORK = "proxy_network"
+STOP_PASSWORD = "1234"  # Password to stop sessions
+
+client = None
+try:
+    client = docker.from_env()
+    client.ping()
+    logging.info("Successfully connected to Docker daemon.")
+except Exception as e:
+    logging.error(f"Fatal Error: Could not connect to Docker daemon: {e}")
+
+active_sessions = {}
+status_log_messages = []
+
+def add_status(message):
+    logging.info(message)
+    status_log_messages.insert(0, f"[{os.times().elapsed:.2f}s] {message}")
+    while len(status_log_messages) > 10:
+        status_log_messages.pop()
+
+HOME_PAGE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
